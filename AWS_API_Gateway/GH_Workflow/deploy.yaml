@@ -1,0 +1,68 @@
+# .github/workflows/deploy.yml
+name: Deploy FastAPI to AWS Lambda
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+        
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+        
+    - name: Terraform Init
+      working-directory: ./terraform
+      run: terraform init
+      
+    - name: Terraform Plan
+      working-directory: ./terraform
+      run: terraform plan -var="api_key=${{ secrets.API_KEY }}"
+      
+    - name: Terraform Apply
+      working-directory: ./terraform
+      run: terraform apply -auto-approve -var="api_key=${{ secrets.API_KEY }}" > /dev/null 2>&1
+      
+    - name: Test API and Send API URL
+      working-directory: ./terraform
+      run: |
+        API_URL=$(terraform output -raw api_gateway_url 2>/dev/null)
+        
+        # Wait a moment for deployment to be ready
+        sleep 10
+        
+        # Test authenticated endpoint
+        echo "Testing authenticated endpoint..."
+        curl -f -H "X-API-Key: ${{ secrets.API_KEY }}" \
+          "$API_URL/API/lambda/25"
+
+
+        # Send deployment notification to SQS
+        SQS_RESPONSE=$(curl -s -H "X-API-Key: ${{ secrets.API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d "{\"message\": \"🚀 GitHub Actions deployment successful | API URL: $API_URL | Deployed at: $(date -u)\"}" \
+          "$API_URL/API/SQS/send-message-to-sqs")
+        
+        if [[ "$SQS_RESPONSE" == *"success"* ]] || [[ "$SQS_RESPONSE" == *"sent"* ]]; then
+          echo "✅ Deployment notification sent to SQS successfully"
+        else
+          echo "⚠️ SQS notification may have failed, but deployment completed"
+        fi
+        
+        
+        echo "🎉 Deployment completed! - API URL sent to SQS queue"
